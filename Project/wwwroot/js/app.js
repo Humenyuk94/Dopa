@@ -24,9 +24,32 @@ class CamerasCRM {
         this.isPageVisible = true;
         this.logsBatch = [];
         this.batchTimeout = null;
+        this.chartDataReady = false;
 
         // Cached DOM elements
         this.dom = {};
+    }
+
+    // Build filter params for API calls
+    buildFilterParams(includePagination = false) {
+        const params = new URLSearchParams();
+
+        if (this.selectedLogLevel) {
+            params.append('level', this.selectedLogLevel);
+        }
+
+        const dateFrom = this.dom.logDateFrom?.value;
+        const dateTo = this.dom.logDateTo?.value;
+
+        if (dateFrom) params.append('from', dateFrom);
+        if (dateTo) params.append('to', dateTo);
+
+        if (includePagination) {
+            params.append('page', this.currentPage);
+            params.append('pageSize', this.logsPerPage);
+        }
+
+        return params;
     }
 
     init() {
@@ -84,15 +107,59 @@ class CamerasCRM {
 
             this.initDatePickers();
             this.initCustomSelect();
+            this.chartDataReady = true;
         } catch (error) {
             console.error('Критическая ошибка загрузки данных:', error);
             this.showToast('Ошибка', 'Не удалось загрузить данные');
         } finally {
+            // Wait for chart to be rendered before hiding loader
             requestAnimationFrame(() => {
-                this.hideGlobalLoader();
-                this.isInitialLoad = false;
+                setTimeout(() => {
+                    this.hideGlobalLoader();
+                    this.isInitialLoad = false;
+                }, 100);
             });
         }
+    }
+
+    // Clear all filters and reload
+    clearFilters() {
+        this.selectedLogLevel = '';
+        this.currentPage = 1;
+
+        // Reset UI
+        if (this.dom.logDateFrom) this.dom.logDateFrom.value = '';
+        if (this.dom.logDateTo) this.dom.logDateTo.value = '';
+
+        // Reset custom select
+        const wrapper = this.dom.logLevelFilterWrapper;
+        if (wrapper) {
+            const trigger = wrapper.querySelector('.custom-select-trigger span');
+            if (trigger) trigger.textContent = 'Все уровни';
+            wrapper.querySelectorAll('.custom-option').forEach(opt => {
+                opt.classList.toggle('active', opt.dataset.value === '');
+            });
+        }
+
+        // Clear datepickers
+        this.datepickers.forEach(dp => dp.clear && dp.clear());
+
+        this.loadLogs();
+    }
+
+    // Get current filter description for display
+    getFilterDescription() {
+        const parts = [];
+        if (this.selectedLogLevel) {
+            parts.push(`Уровень: ${this.selectedLogLevel}`);
+        }
+        if (this.dom.logDateFrom?.value) {
+            parts.push(`С: ${this.dom.logDateFrom.value}`);
+        }
+        if (this.dom.logDateTo?.value) {
+            parts.push(`По: ${this.dom.logDateTo.value}`);
+        }
+        return parts.length ? parts.join(', ') : 'Все логи';
     }
 
     hideGlobalLoader() {
@@ -164,6 +231,10 @@ class CamerasCRM {
                 }
                 this.selectedLogLevel = option.dataset.value || '';
                 wrapper.classList.remove('active');
+
+                // Auto-apply filter and reload with new chart
+                this.currentPage = 1;
+                this.loadLogs();
             });
         });
 
@@ -534,23 +605,12 @@ class CamerasCRM {
     }
 
     async loadLogs() {
-        const params = new URLSearchParams({
-            page: this.currentPage,
-            pageSize: this.logsPerPage
-        });
-
-        if (this.selectedLogLevel) params.append('level', this.selectedLogLevel);
-        if (this.dom.logDateFrom?.value) params.append('from', this.dom.logDateFrom.value);
-        if (this.dom.logDateTo?.value) params.append('to', this.dom.logDateTo.value);
-
-        const statsParams = new URLSearchParams();
-        if (this.selectedLogLevel) statsParams.append('level', this.selectedLogLevel);
-        if (this.dom.logDateFrom?.value) statsParams.append('from', this.dom.logDateFrom.value);
-        if (this.dom.logDateTo?.value) statsParams.append('to', this.dom.logDateTo.value);
+        const logsParams = this.buildFilterParams(true);
+        const statsParams = this.buildFilterParams(false);
 
         try {
             const [logsResponse, statsResponse] = await Promise.all([
-                fetch(`/api/logs?${params}`, { headers: this.getHeaders() }),
+                fetch(`/api/logs?${logsParams}`, { headers: this.getHeaders() }),
                 fetch(`/api/logs/stats?${statsParams}`, { headers: this.getHeaders() })
             ]);
 
@@ -727,12 +787,21 @@ class CamerasCRM {
         const sortedData = sortedKeys.map(key => stats.hourlyActivity[key]);
         const isDark = this.currentTheme === 'dark';
 
+        // Show filter info in chart label if filters are active
+        const hasFilters = this.selectedLogLevel || this.dom.logDateFrom?.value || this.dom.logDateTo?.value;
+        const chartLabel = hasFilters ? `Активность (${this.selectedLogLevel || 'все'})` : 'Активность';
+
+        // Animation: none on initial load, smooth on filter changes
+        const animationConfig = this.isInitialLoad
+            ? { duration: 0 }
+            : { duration: 400, easing: 'easeOutQuart' };
+
         this.chart = new Chart(ctx, {
             type: 'line',
             data: {
                 labels: sortedKeys,
                 datasets: [{
-                    label: 'Активность',
+                    label: chartLabel,
                     data: sortedData,
                     borderColor: 'rgb(255,140,66)',
                     backgroundColor: gradient,
@@ -750,7 +819,7 @@ class CamerasCRM {
                 responsive: true,
                 maintainAspectRatio: false,
                 interaction: { intersect: false, mode: 'index' },
-                animation: { duration: 0 },
+                animation: animationConfig,
                 plugins: {
                     legend: {
                         display: true,
